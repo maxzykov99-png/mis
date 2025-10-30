@@ -1,0 +1,363 @@
+from PyQt5 import uic, QtWidgets, QtCore, QtGui
+import os, json, datetime
+from config import UI_DIR
+from models.db import save_patient, init_db, save_visit, list_patients_like, list_visits_for_date, get_visit_by_id
+from settings_store import load_settings, get_current_user
+
+class MainWindowController(QtWidgets.QMainWindow):
+    def __init__(self):
+        super().__init__()
+        ui_path = os.path.join(UI_DIR, "mainwindow.ui")
+        try:
+            uic.loadUi(ui_path, self)
+        except Exception as e:
+            print('Ошибка загрузки mainwindow.ui:', e)
+
+        # Auto init DB if missing
+        try:
+            init_db()
+        except Exception as e:
+            print('init_db error', e)
+
+        self.app_settings = load_settings()
+
+        # Connect menu actions
+        try:
+            if hasattr(self, 'reports'):
+                self.reports.triggered.connect(self.open_reports)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'opendatabase'):
+                self.opendatabase.triggered.connect(self.open_database)
+        except Exception:
+            pass
+
+        # Buttons
+        if hasattr(self, 'savesession'):
+            self.savesession.clicked.connect(self.on_save_clicked)
+        if hasattr(self, 'closecase'):
+            self.closecase.clicked.connect(self.on_closecase)
+        if hasattr(self, 'pushButton_epicrisis'):
+            self.pushButton_epicrisis.clicked.connect(self.show_epikriz)
+        if hasattr(self, 'epikrizbut'):
+            self.epikrizbut.clicked.connect(self.show_epikriz)
+
+        # Autocomplete for patientfio
+        if hasattr(self, 'patientfio'):
+            completer = QtWidgets.QCompleter([], self)
+            completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)
+            self.patientfio.setCompleter(completer)
+            self.patientfio.textEdited.connect(self.on_patientfio_edited)
+
+        # Fill comboboxes from settings
+        self.apply_settings_to_ui(self.app_settings)
+
+        # patientlist table
+        if hasattr(self, 'patientlist'):
+            try:
+                self.patientlist.setColumnCount(4)
+                self.patientlist.setHorizontalHeaderLabels(['id','Время','Пациент','МКБ'])
+                self.patientlist.hideColumn(0)
+            except Exception:
+                pass
+            self.patientlist.doubleClicked.connect(self.on_patientlist_doubleclick)
+            self.load_today_visits()
+
+        # LCD show hours:minutes
+        if hasattr(self, 'LCDtimedate'):
+            self._timer_clock = QtCore.QTimer(self)
+            self._timer_clock.timeout.connect(self.update_clock)
+            self._timer_clock.start(1000)
+            self.update_clock()
+
+
+    def apply_theme(self, theme_name='light'):
+        try:
+            if theme_name == 'dark':
+                # Simple built-in dark theme
+                self.setStyleSheet("QWidget{background:#2b2b2b;color:#e6e6e6;} QLineEdit{background:#3c3c3c;} QTableWidget{background:#3c3c3c;}")
+            else:
+                self.setStyleSheet("")
+        except Exception:
+            pass
+
+    
+    def apply_settings_to_ui(self, settings):
+        """Применяет настройки приложения к интерфейсу главного окна."""
+        try:
+            # Применяем тему
+            try:
+                theme = settings.get('theme', 'light')
+                self.apply_theme(theme)
+            except Exception:
+                pass
+
+            # Загружаем списки
+            orgs = settings.get('organisations', []) or []
+            medics = settings.get('medics', []) or []
+
+            # Организации
+            if hasattr(self, 'organisation'):
+                try:
+                    self.organisation.clear()
+                    self.organisation.addItems(orgs)
+                except Exception:
+                    pass
+
+            # Список врачей
+            try:
+                if hasattr(self, 'fiovrach'):
+                    try:
+                        if hasattr(self.fiovrach, 'addItems'):
+                            self.fiovrach.clear()
+                            if medics:
+                                self.fiovrach.addItems(medics)
+                        else:
+                            if medics:
+                                try:
+                                    self.fiovrach.setText(medics[0])
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        print('Ошибка заполнения fiovrach:', e)
+            except Exception:
+                pass
+
+        except Exception as e:
+            print('Ошибка применения настроек:', e)
+
+
+    def update_clock(self):
+        now = datetime.datetime.now().strftime('%H:%M')
+        try:
+            self.LCDtimedate.display(now)
+        except Exception:
+            pass
+
+    def on_patientfio_edited(self, text):
+        try:
+            suggestions = list_patients_like(text, limit=50)
+            model = QtCore.QStringListModel(suggestions, self)
+            self.patientfio.completer().setModel(model)
+        except Exception:
+            pass
+
+    def collect_patient_from_form(self) -> dict:
+        def get_value(w):
+            try:
+                if isinstance(w, QtWidgets.QLineEdit):
+                    return w.text()
+                if isinstance(w, QtWidgets.QTextEdit):
+                    return w.toPlainText()
+                if isinstance(w, QtWidgets.QComboBox):
+                    return w.currentText()
+                if isinstance(w, QtWidgets.QDateEdit):
+                    return w.date().toString('yyyy-MM-dd')
+                if isinstance(w, QtWidgets.QCheckBox):
+                    return w.isChecked()
+            except Exception:
+                pass
+            return None
+
+        patient = {
+            'fio': getattr(self, 'patientfio').text() if hasattr(self, 'patientfio') else '',
+            'birthdate': getattr(self, 'patientdate').date().toString('yyyy-MM-dd') if hasattr(self, 'patientdate') else None,
+            'phone': getattr(self, 'phone_pole').text() if hasattr(self, 'phone_pole') else '',
+            'organisation': getattr(self, 'organisation').currentText() if hasattr(self, 'organisation') else ''
+        }
+
+        full = {}
+        for w in self.findChildren((QtWidgets.QLineEdit, QtWidgets.QTextEdit, QtWidgets.QComboBox, QtWidgets.QDateEdit, QtWidgets.QCheckBox)):
+            try:
+                name = w.objectName()
+                full[name] = get_value(w)
+            except Exception:
+                pass
+
+        patient['full_epicrisis'] = full
+        return patient
+
+    def on_save_clicked(self):
+        self.on_closecase()
+
+    def on_closecase(self):
+        try:
+            patient = self.collect_patient_from_form()
+            # require FIO
+            if not patient.get('fio') or not str(patient.get('fio')).strip():
+                QtWidgets.QMessageBox.warning(self, 'Ошибка', 'Введите ФИО пациента перед сохранением.')
+                return
+            pid = save_patient(patient)
+            visit_datetime = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            diagnosis = ''
+            mkb_code = ''
+            outcome = ''
+            evacuation_place = ''
+            try:
+                if hasattr(self, 'diagnosis'):
+                    diagnosis = self.diagnosis.text()
+                if hasattr(self, 'mkb10list'):
+                    mkb_code = self.mkb10list.currentText() if isinstance(self.mkb10list, QtWidgets.QComboBox) else ''
+                if hasattr(self, 'outcome'):
+                    outcome = self.outcome.currentText() if isinstance(self.outcome, QtWidgets.QComboBox) else ''
+                if hasattr(self, 'evacuation'):
+                    evacuation_place = self.evacuation.text() if hasattr(self, 'evacuation') else ''
+            except Exception:
+                pass
+            vid = save_visit(pid, visit_datetime, getattr(self, 'vidpriema').currentText() if hasattr(self,'vidpriema') else '',
+                             getattr(self, 'obschsost').currentText() if hasattr(self,'obschsost') else '',
+                             getattr(self, 'soznanie').currentText() if hasattr(self,'soznanie') else '',
+                             get_current_user() or (getattr(self, 'profession').text() if hasattr(self, 'profession') else ''),
+                             diagnosis, mkb_code, outcome, evacuation_place, patient['full_epicrisis'])
+            QtWidgets.QMessageBox.information(self, 'Сохранено', f'Кейс сохранён (id={vid})')
+            try:
+                self.load_today_visits()
+            except Exception:
+                pass
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, 'Ошибка', f'Не удалось сохранить кейс: {e}')
+
+    def load_today_visits(self):
+        try:
+            today = __import__('datetime').date.today().isoformat()
+            rows = list_visits_for_date(today)
+            try:
+                self.patientlist.setColumnCount(4)
+                self.patientlist.setHorizontalHeaderLabels(['id','Время','Пациент','МКБ'])
+            except Exception:
+                pass
+            self.patientlist.setRowCount(len(rows))
+            for i, r in enumerate(rows):
+                id_item = QtWidgets.QTableWidgetItem(str(r.get('id')))
+                time_item = QtWidgets.QTableWidgetItem(str(r.get('visit_datetime')))
+                fio_item = QtWidgets.QTableWidgetItem(r.get('patient_fio') or '')
+                mkb_item = QtWidgets.QTableWidgetItem(r.get('mkb_code') or '')
+                try:
+                    self.patientlist.setItem(i,0,id_item)
+                    self.patientlist.setItem(i,1,time_item)
+                    self.patientlist.setItem(i,2,fio_item)
+                    self.patientlist.setItem(i,3,mkb_item)
+                except Exception:
+                    pass
+            try:
+                self.patientlist.hideColumn(0)
+            except Exception:
+                pass
+        except Exception as e:
+            print('load_today_visits error', e)
+
+    def on_patientlist_doubleclick(self, index):
+        try:
+            row = index.row()
+            id_item = self.patientlist.item(row, 0)
+            if not id_item:
+                return
+            vid = int(id_item.text())
+            visit = get_visit_by_id(vid)
+            if not visit:
+                QtWidgets.QMessageBox.warning(self, 'Ошибка', 'Кейс не найден')
+                return
+            self.open_visit_in_ui(visit)
+        except Exception as e:
+            print('on_patientlist_doubleclick error', e)
+
+    def open_visit_in_ui(self, visit):
+        fc = visit.get('full_epicrisis', {}) or {}
+        for k, v in fc.items():
+            if hasattr(self, k):
+                w = getattr(self, k)
+                try:
+                    if isinstance(w, QtWidgets.QLineEdit):
+                        w.setText(str(v))
+                    elif isinstance(w, QtWidgets.QTextEdit):
+                        w.setPlainText(str(v))
+                    elif isinstance(w, QtWidgets.QComboBox):
+                        idx = w.findText(str(v))
+                        if idx>=0:
+                            w.setCurrentIndex(idx)
+                        else:
+                            try:
+                                w.setCurrentText(str(v))
+                            except Exception:
+                                pass
+                    elif isinstance(w, QtWidgets.QDateEdit):
+                        try:
+                            dt = QtCore.QDate.fromString(str(v), 'yyyy-MM-dd')
+                            w.setDate(dt)
+                        except Exception:
+                            pass
+                    elif isinstance(w, QtWidgets.QCheckBox):
+                        try:
+                            w.setChecked(bool(v))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+    def show_epikriz(self, visit=None):
+        # PyQt signals (QAction.triggered) may pass a boolean 'checked' argument.
+        if isinstance(visit, bool):
+            visit = None
+
+        if visit is None:
+            patient = self.collect_patient_from_form()
+            fc = patient.get('full_epicrisis', {})
+            header = f"Пациент: {patient.get('fio')}\nДата: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        else:
+            fc = visit.get('full_epicrisis', {}) or {}
+            header = f"Пациент: {visit.get('patient_fio')}\nДата: {visit.get('visit_datetime')}\n\n"
+        lines = [header]
+        for k, v in fc.items():
+            lines.append(f"{k}: {v}")
+        text = '\n'.join(lines)
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle('Эпикриз')
+        dlg.resize(800, 600)
+        lay = QtWidgets.QVBoxLayout(dlg)
+        txt = QtWidgets.QTextEdit(dlg)
+        txt.setPlainText(text)
+        lay.addWidget(txt)
+        btns = QtWidgets.QHBoxLayout()
+        btn_save = QtWidgets.QPushButton('Сохранить в Word')
+        btn_close = QtWidgets.QPushButton('Закрыть')
+        btns.addWidget(btn_save)
+        btns.addWidget(btn_close)
+        lay.addLayout(btns)
+        def save_word():
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(self, 'Сохранить эпикриз в Word', '', 'Word Files (*.docx);;Text Files (*.txt)')
+            if not path:
+                return
+            if path.lower().endswith('.docx'):
+                try:
+                    from docx import Document
+                    doc = Document()
+                    for line in txt.toPlainText().split('\n'):
+                        doc.add_paragraph(line)
+                    doc.save(path)
+                    QtWidgets.QMessageBox.information(self, 'Сохранено', f'Эпикриз сохранён: {path}')
+                except Exception as e:
+                    QtWidgets.QMessageBox.critical(self, 'Ошибка', f'Не удалось сохранить в Word: {e}')
+            else:
+                # txt fallback
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(txt.toPlainText())
+                QtWidgets.QMessageBox.information(self, 'Сохранено', f'Эпикриз сохранён (txt): {path}')
+        btn_save.clicked.connect(save_word)
+        btn_close.clicked.connect(dlg.accept)
+        dlg.exec_()
+
+    def open_reports(self):
+        from controllers.reports_controller import ReportsController
+        self._reports_win = ReportsController()
+        self._reports_win.show()
+
+    def open_database(self):
+        from controllers.database_controller import DatabaseController
+        # ensure DB init
+        try:
+            init_db()
+        except Exception:
+            pass
+        self._db_win = DatabaseController()
+        self._db_win.show()

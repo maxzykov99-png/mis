@@ -1,0 +1,179 @@
+from PyQt5 import uic, QtWidgets, QtCore
+import os
+from config import UI_DIR
+from settings_store import load_settings, save_settings, add_user
+
+class SettingsController(QtWidgets.QMainWindow):
+    settings_updated = QtCore.pyqtSignal(dict)
+
+    def __init__(self):
+        super().__init__()
+        ui_path = os.path.join(UI_DIR, "settings.ui")
+        try:
+            uic.loadUi(ui_path, self)
+        except Exception as e:
+            print("Ошибка загрузки settings.ui:", e)
+
+        self.app_settings = load_settings()
+        self.load_into_ui()
+        # connect buttons
+        if hasattr(self, 'savesettings'):
+            self.savesettings.clicked.connect(self.on_save_settings)
+        if hasattr(self, 'exitsettings'):
+            self.exitsettings.clicked.connect(self.close)
+        if hasattr(self, 'add_organisation'):
+            self.add_organisation.clicked.connect(self.on_add_org)
+        if hasattr(self, 'delete_organisation'):
+            self.delete_organisation.clicked.connect(self.on_delete_org)
+        if hasattr(self, 'addmedic'):
+            self.addmedic.clicked.connect(self.on_add_medic)
+        if hasattr(self, 'deletemedic'):
+            self.deletemedic.clicked.connect(self.on_delete_medic)
+
+    def load_into_ui(self):
+        try:
+            self.autosaveon.setChecked(bool(self.app_settings.get('autosave_on', True)))
+        except Exception:
+            pass
+        try:
+            self.autosaveintervalspin.setValue(int(self.app_settings.get('autosave_interval', 60)))
+        except Exception:
+            pass
+        # --- GPT: populate theme combobox automatically if present ---
+        try:
+            from PyQt5 import QtWidgets
+            theme_combo = None
+            for cb in self.findChildren(QtWidgets.QComboBox):
+                name = cb.objectName().lower()
+                if 'theme' in name or 'тема' in name:
+                    theme_combo = cb
+                    break
+            if theme_combo is not None:
+                theme_combo.clear()
+                theme_combo.addItem('Светлая', 'light')
+                theme_combo.addItem('Тёмная', 'dark')
+                # set current
+                cur = self.app_settings.get('theme', 'light')
+                idx = 0 if cur=='light' else 1
+                try:
+                    theme_combo.setCurrentIndex(idx)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        if hasattr(self, 'list_organisation'):
+            self.list_organisation.clear()
+            for o in self.app_settings.get('organisations', []):
+                self.list_organisation.addItem(o)
+        if hasattr(self, 'listvrachadd'):
+            self.listvrachadd.clear()
+            for v in self.app_settings.get('medics', []):
+                self.listvrachadd.addItem(v)
+
+    def on_save_settings(self):
+        try:
+            # read UI settings
+            self.app_settings['autosave_on'] = self.autosaveon.isChecked() if hasattr(self,'autosaveon') else True
+            self.app_settings['autosave_interval'] = int(self.autosaveintervalspin.value()) if hasattr(self,'autosaveintervalspin') else 60
+            if hasattr(self,'list_organisation'):
+                self.app_settings['organisations'] = [self.list_organisation.item(i).text() for i in range(self.list_organisation.count())]
+            if hasattr(self,'listvrachadd'):
+                self.app_settings['medics'] = [self.listvrachadd.item(i).text() for i in range(self.listvrachadd.count())]
+            # GPT: save theme selection if combobox exists
+            try:
+                from PyQt5 import QtWidgets
+                theme_combo = None
+                for cb in self.findChildren(QtWidgets.QComboBox):
+                    name = cb.objectName().lower()
+                    if 'theme' in name or 'тема' in name:
+                        theme_combo = cb
+                        break
+                if theme_combo is not None:
+                    self.app_settings['theme'] = theme_combo.currentData() or ('light' if theme_combo.currentText().lower().startswith('с') else 'dark')
+            except Exception:
+                pass
+            # password handling
+            if hasattr(self,'passwordnew') and self.passwordnew.text():
+                pwd = self.passwordnew.text()
+                pwd2 = self.passwordnewdouble.text() if hasattr(self,'passwordnewdouble') else ''
+                if pwd != pwd2:
+                    QtWidgets.QMessageBox.warning(self, 'Ошибка', 'Пароли не совпадают')
+                    return
+                # update current user password (or admin)
+                user = self.listvrachadd.currentText() if hasattr(self,'listvrachadd') and self.listvrachadd.currentText() else 'admin'
+                add_user(user, pwd)
+            save_settings(self.app_settings)
+            # emit signal for other windows to update dynamically
+            try:
+                self.settings_updated.emit(self.app_settings)
+            except Exception:
+                pass
+            QtWidgets.QMessageBox.information(self, 'Настройки', 'Настройки сохранены')
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, 'Ошибка', f'Не удалось сохранить настройки: {e}')
+
+    def on_add_org(self):
+        if not hasattr(self,'list_organisation'):
+            return
+        text, ok = QtWidgets.QInputDialog.getText(self, 'Добавить организацию', 'Название:')
+        if ok and text:
+            self.list_organisation.addItem(text)
+
+    def on_delete_org(self):
+        if not hasattr(self,'list_organisation'):
+            return
+        row = self.list_organisation.currentRow()
+        if row>=0:
+            self.list_organisation.takeItem(row)
+
+    def on_add_medic(self):
+        if not hasattr(self,'listvrachadd'):
+            return
+        text, ok = QtWidgets.QInputDialog.getText(self, 'Добавить врача', 'ФИО:')
+        if ok and text:
+            self.listvrachadd.addItem(text)
+
+    def on_delete_medic(self):
+        if not hasattr(self,'listvrachadd'):
+            return
+        row = self.listvrachadd.currentRow()
+        if row>=0:
+            self.listvrachadd.takeItem(row)
+
+
+    def on_change_password(self):
+        # expects widgets: passwordnow, passportnew (sic) or passwordnew
+        try:
+            username = None
+            try:
+                username = self.currentuser.text()
+            except Exception:
+                username = None
+            if not username:
+                username = None
+            old = ''
+            new = ''
+            try:
+                old = self.passwordnow.text()
+                new = self.passwordnew.text()
+            except Exception:
+                try:
+                    old = self.passwordnow.text()
+                    new = self.passportnew.text()
+                except Exception:
+                    pass
+            if not username:
+                # fallback to current user from settings
+                from settings_store import get_current_user
+                username = get_current_user()
+            if not username:
+                QtWidgets.QMessageBox.warning(self, 'Ошибка', 'Не указан пользователь')
+                return
+            from settings_store import change_password
+            ok = change_password(username, old, new)
+            if ok:
+                QtWidgets.QMessageBox.information(self, 'Пароль', 'Пароль успешно изменён')
+            else:
+                QtWidgets.QMessageBox.critical(self, 'Пароль', 'Неверный старый пароль')
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, 'Ошибка', f'Не удалось сменить пароль: {e}')

@@ -1,0 +1,18 @@
+[
+  {
+    "code": "A00",
+    "desc": "Cholera"
+  },
+  {
+    "code": "B00",
+    "desc": "Herpesviral [herpes simplex] infections"
+  },
+  {
+    "code": "I10",
+    "desc": "Essential (primary) hypertension"
+  },
+  {
+    "code": "J20",
+    "desc": "Acute bronchitis"
+  }
+]
